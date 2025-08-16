@@ -4,10 +4,13 @@ WE HAVE USED OFFICIAL BANGALORE DATA FROM KAGGLE PLATFORM, IT CONTAINS NEARLY 41
 ## 📦 Installation
 
 1.    python -m venv .venv
+
       source .venv/bin/activate   # on Linux/Mac
+
       .venv\Scripts\activate      # on Windows
 
-2.    python -m pip install --upgrade pip
+3.    python -m pip install --upgrade pip
+
       pip install -r requirements.txt
 
 ## ▶️ Running the App
