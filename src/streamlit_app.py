@@ -1,9 +1,3 @@
-# Updated version of streamline_app.py:
-# - Replaced manual text input of area names for origin and destination 
-#   with automatic coordinate fetching (geocoding).
-# - Users no longer type area names directly; instead, the app retrieves 
-#   the latitude and longitude values automatically for route calculations.
-
 import time
 from pathlib import Path
 import streamlit as st
@@ -11,20 +5,27 @@ from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import pandas as pd
 
+
 # Lazy import heavy libs only when needed
 def import_safest_route_utils():
-    global build_and_route, load_accident_data, detect_hotspots_dbscan, build_graph, attach_risk_to_graph
-    from safest_route_utils import build_and_route, load_accident_data, detect_hotspots_dbscan, build_graph, attach_risk_to_graph
+    global build_and_route, load_accident_data, detect_hotspots_dbscan, build_graph, attach_risk_to_graph, safest_path_bmssp, folium_map_with_route
+    from safest_route_utils import (
+        build_and_route, load_accident_data, detect_hotspots_dbscan,
+        build_graph, attach_risk_to_graph, safest_path_bmssp, folium_map_with_route
+    )
 
 import_safest_route_utils()
 
+
 st.set_page_config(page_title="Bangalore Safest Route", layout="wide")
 st.title("🚦 Bangalore Safest Route (OpenStreetMap + DBSCAN)")
+
 
 st.markdown(
     "This app uses **OpenStreetMap**, **DBSCAN** for hotspots, "
     "and **risk-aware routing** to find a safer path."
 )
+
 
 geolocator = Nominatim(user_agent="bangalore_safest_route_app")
 
@@ -73,20 +74,25 @@ with st.sidebar:
     st.header("Route Inputs")
 
     origin_area = st.text_input("Origin area name", value="Hoodi")
-    dest_area = st.text_input("Destination area name", value="Electronic City")
+    dest_area = st.text_input("Destination area name", value="Koramangala")
 
     st.header("Tradeoff")
     alpha = st.slider("Distance weight (alpha)", 0.1, 5.0, 1.0, 0.1)
-    beta = st.slider("Risk weight (beta)", 0.0, 1000.0, 300.0, 50.0)
+    beta = st.slider("Risk weight (beta)", 0.0, 1000.0, 20.0, 50.0)
 
     st.header("Hotspots (DBSCAN)")
     recompute = st.checkbox("Recompute hotspots now", value=False)
-    eps_m = st.slider("DBSCAN eps (meters)", 50, 300, 120, 10)
-    min_samples = st.slider("DBSCAN min_samples", 5, 100, 25, 5)
+    eps_m = st.slider("DBSCAN eps (meters)", 50, 300, 200, 10)
+    min_samples = st.slider("DBSCAN min_samples", 5, 100, 15, 5)
+
+    st.header("BMSSP Routing")
+    bound_B = st.slider("BMSSP cutoff bound (meters)", 5000, 30000, 10000, 1000)
 
     run_btn = st.button("Compute Safest Route")
 
+
 st.markdown("---")
+
 
 if run_btn:
     with st.spinner("Geocoding areas..."):
@@ -101,13 +107,13 @@ if run_btn:
         with st.spinner("Loading accident data..."):
             df = load_accident_data_cached(Path("../outputs/data_prepared.csv"))
 
-        if recompute or not Path("../outputs/hotspots.csv").exists():
+        if recompute or not Path("../outputs/hotspots_map.csv").exists():
             with st.spinner("Detecting hotspots..."):
                 clusters, hotspot_time = detect_hotspots_cached(df, eps_m, min_samples)
-                clusters.to_csv("../outputs/hotspots.csv", index=False)
+                clusters.to_csv("../outputs/hotspots_map.csv", index=False)
                 st.info(f"Hotspot detection took {hotspot_time:.2f} seconds")
         else:
-            clusters = pd.read_csv("../outputs/hotspots.csv")
+            clusters = pd.read_csv("../outputs/hotspots_map.csv")
             hotspot_time = 0.0
 
         with st.spinner("Building graph..."):
@@ -120,24 +126,18 @@ if run_btn:
 
         with st.spinner("Computing route and rendering map..."):
             start_route = time.perf_counter()
-            out_path, clusters, n = build_and_route(
-                origin_lat, origin_lon, dest_lat, dest_lon,
-                place="Bengaluru, Karnataka, India",
-                alpha=alpha, beta=beta,
-                data_path=Path("../outputs/data_prepared.csv"),
-                hotspots_csv=Path("../outputs/hotspots.csv"),
-                save_map_path=Path("../outputs/route_map.html"),
-                recompute_hotspots=False,
-                eps_m=eps_m, min_samples=min_samples
-            )
+            path = safest_path_bmssp(G, (origin_lat, origin_lon), (dest_lat, dest_lon),
+                                    alpha=alpha, beta=beta, bound_B=bound_B)
+            save_map_path = Path("../outputs/route_map.html")
+            folium_map_with_route(G, path, clusters, accidents_df=df, save_path=save_map_path)
             route_time = time.perf_counter() - start_route
 
-        st.success(f"Done! Accidents used: {n:,} • Hotspots: {len(clusters)}")
+        st.success(f"Done! Accidents used: {len(df):,} • Hotspots: {len(clusters)}")
         st.info(f"Route computation took {route_time:.2f} seconds")
-        st.caption(f"Map file: {out_path}")
+        st.caption(f"Map file: {save_map_path}")
 
-        if Path(out_path).exists():
-            html = Path(out_path).read_text(encoding="utf-8")
+        if save_map_path.exists():
+            html = save_map_path.read_text(encoding="utf-8")
             st.components.v1.html(html, height=680, scrolling=True)
 else:
     st.info("Fill inputs on the left and click **Compute Safest Route**.")
