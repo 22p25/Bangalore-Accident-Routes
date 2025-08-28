@@ -1,14 +1,3 @@
-"""
-Safest route utilities (safety prioritized):
-- Loads accidents, detects DBSCAN hotspots (or reads precomputed).
-- Builds a drivable graph from OpenStreetMap (free).
-- Attaches a risk score to each edge based on distance to hotspots.
-- Computes a route minimizing alpha*length + beta*risk (with strong bias to safety).
-- Saves an interactive Folium map with route + hotspots.
-
-No Google APIs used.
-"""
-
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -19,6 +8,7 @@ from osmnx.distance import add_edge_lengths
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import BallTree
 import osmnx as ox
+import heapq
 
 R_EARTH = 6371000.0  # meters
 
@@ -30,17 +20,17 @@ def load_accident_data(path: str | Path) -> pd.DataFrame:
     df = df.dropna(subset=["lat", "lon"]).copy()
     return df
 
-def detect_hotspots_dbscan(df: pd.DataFrame, eps_m: float = 120, min_samples: int = 25) -> pd.DataFrame:
-    coords_rad = np.radians(df[["lat","lon"]].values)
-    db = DBSCAN(eps=eps_m/R_EARTH, min_samples=min_samples, metric="haversine", n_jobs=-1)
+def detect_hotspots_dbscan(df: pd.DataFrame, eps_m: float = 200, min_samples: int = 15) -> pd.DataFrame:
+    coords_rad = np.radians(df[["lat", "lon"]].values)
+    db = DBSCAN(eps=eps_m / R_EARTH, min_samples=min_samples, metric="haversine", n_jobs=-1)
     labels = db.fit_predict(coords_rad)
     df = df.copy()
     df["cluster_id"] = labels
     clusters = (
         df[df["cluster_id"] >= 0]
         .groupby("cluster_id")
-        .agg(lat=("lat","mean"), lon=("lon","mean"),
-             count=("cluster_id","size"), avg_speed=("speed_kmh","mean"))
+        .agg(lat=("lat", "mean"), lon=("lon", "mean"),
+             count=("cluster_id", "size"), avg_speed=("speed_kmh", "mean"))
         .reset_index()
         .sort_values("count", ascending=False)
     )
@@ -57,7 +47,7 @@ def build_graph(place: str = "Bengaluru, Karnataka, India") -> nx.MultiDiGraph:
 def _hotspot_tree(clusters: pd.DataFrame):
     if clusters is None or len(clusters) == 0:
         return None, None, None
-    pts_deg = clusters[["lat","lon"]].values
+    pts_deg = clusters[["lat", "lon"]].values
     pts_rad = np.radians(pts_deg)
     tree = BallTree(pts_rad, metric="haversine")
     weights = clusters["count"].to_numpy(dtype=float)
@@ -81,7 +71,6 @@ def attach_risk_to_graph(G: nx.MultiDiGraph, clusters: pd.DataFrame,
         for _, _, _, d in G.edges(keys=True, data=True):
             d["risk"] = 0.0
         return G
-
     k = int(min(k_neigh, len(clusters)))
     for u, v, kkey, data in G.edges(keys=True, data=True):
         lat, lon = _edge_midpoint_latlon(G, u, v, data)
@@ -95,30 +84,47 @@ def attach_risk_to_graph(G: nx.MultiDiGraph, clusters: pd.DataFrame,
 # ----------------------------
 # Routing + map rendering
 # ----------------------------
-def safest_path(G: nx.MultiDiGraph, origin_latlon: tuple[float, float],
-                dest_latlon: tuple[float, float], alpha: float = 1.0, beta: float = 20.0):
-    """
-    Strongly prioritize safety over distance.
-    Minimize alpha*normalized_length + beta*normalized_risk (+ extra hotspot penalty).
-    """
+def bmssp(G, sources, bound_B, weight="safety_weight"):
+    dist = {v: float('inf') for v in G.nodes}
+    pq = []
+    for s in sources:
+        dist[s] = 0
+        heapq.heappush(pq, (0, s))
+    complete = set()
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d != dist[u]:
+            continue
+        if d >= bound_B:
+            break
+        complete.add(u)
+        for v in G.successors(u):
+            for key in G[u][v]:
+                w = G[u][v][key].get(weight, 1.0)
+                nd = d + w
+                if nd < dist[v] and nd < bound_B:
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+    return {v: dist[v] for v in complete}
+
+def safest_path_bmssp(G: nx.MultiDiGraph, origin_latlon: tuple[float, float],
+                      dest_latlon: tuple[float, float], alpha: float = 1.0, beta: float = 20.0,
+                      bound_B: float = 10000):
     orig = ox.distance.nearest_nodes(G, X=[origin_latlon[1]], Y=[origin_latlon[0]])[0]
     dest = ox.distance.nearest_nodes(G, X=[dest_latlon[1]], Y=[dest_latlon[0]])[0]
-
-    lengths = [d.get("length", 1.0) for _,_,_,d in G.edges(keys=True, data=True)]
-    risks   = [d.get("risk", 0.0) for _,_,_,d in G.edges(keys=True, data=True)]
+    lengths = [d.get("length", 1.0) for _, _, _, d in G.edges(keys=True, data=True)]
+    risks = [d.get("risk", 0.0) for _, _, _, d in G.edges(keys=True, data=True)]
     max_len = max(lengths) if lengths else 1.0
     max_risk = max(risks) if risks else 1.0
-
     for _, _, _, d in G.edges(keys=True, data=True):
         norm_len = d.get("length", 1.0) / max_len
         norm_risk = d.get("risk", 0.0) / (max_risk + 1e-9)
-
         d["safety_weight"] = alpha * norm_len + beta * norm_risk
-
-        # Big penalty if edge passes through a dense hotspot
         if norm_risk > 0.7:
             d["safety_weight"] += 50
-
+    dist_map = bmssp(G, [orig], bound_B, weight="safety_weight")
+    if dest not in dist_map:
+        raise Exception("Destination not reachable within bound_B")
     path = nx.shortest_path(G, source=orig, target=dest, weight="safety_weight")
     return path
 
@@ -131,13 +137,10 @@ def folium_map_with_route(G: nx.MultiDiGraph, path_nodes: list[int],
         center = [float(np.mean(lats)), float(np.mean(lons))]
     else:
         center = [12.9716, 77.5946]
-
     m = folium.Map(location=center, zoom_start=13, tiles="OpenStreetMap")
-
     if accidents_df is not None and len(accidents_df) > 0:
         pts = accidents_df[["lat","lon"]].dropna().values.tolist()
         HeatMap(pts, radius=7, blur=11, max_zoom=17).add_to(m)
-
     if clusters is not None and len(clusters) > 0:
         mc = MarkerCluster().add_to(m)
         for _, r in clusters.iterrows():
@@ -153,11 +156,9 @@ def folium_map_with_route(G: nx.MultiDiGraph, path_nodes: list[int],
                 tooltip=f"Hotspot • {int(r['count'])} events",
                 fill=True, fill_opacity=0.75
             ).add_to(mc)
-
     if path_nodes and len(path_nodes) > 1:
         coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path_nodes]
         folium.PolyLine(coords, weight=6, opacity=0.9, color="green", tooltip="Safest route").add_to(m)
-
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     m.save(str(save_path))
 
@@ -168,23 +169,20 @@ def build_and_route(origin_lat: float, origin_lon: float, dest_lat: float, dest_
                     place: str = "Bengaluru, Karnataka, India",
                     alpha: float = 1.0, beta: float = 20.0,
                     data_path: str | Path = "outputs/data_prepared.csv",
-                    hotspots_csv: str | Path = "outputs/hotspots.csv",
+                    hotspots_csv: str | Path = "outputs/hotspots_map.csv",
                     save_map_path: str | Path = "outputs/route_map.html",
                     recompute_hotspots: bool = False,
-                    eps_m: float = 120, min_samples: int = 25):
-
+                    eps_m: float = 200, min_samples: int = 15,
+                    bound_B: float = 10000):
     df = load_accident_data(data_path)
-
     if recompute_hotspots or not Path(hotspots_csv).exists():
         clusters = detect_hotspots_dbscan(df, eps_m=eps_m, min_samples=min_samples)
         clusters.to_csv(hotspots_csv, index=False)
     else:
         clusters = pd.read_csv(hotspots_csv)
-
     G = build_graph(place=place)
     G = attach_risk_to_graph(G, clusters)
-
-    path = safest_path(G, (origin_lat, origin_lon), (dest_lat, dest_lon), alpha=alpha, beta=beta)
+    path = safest_path_bmssp(G, (origin_lat, origin_lon), (dest_lat, dest_lon),
+                            alpha=alpha, beta=beta, bound_B=bound_B)
     folium_map_with_route(G, path, clusters, accidents_df=df, save_path=save_map_path)
-
     return save_map_path, clusters, len(df)
