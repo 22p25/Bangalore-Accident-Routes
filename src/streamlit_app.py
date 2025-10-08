@@ -135,7 +135,6 @@ if run_btn:
         except Exception as e:
             dest_weather = f"Could not fetch destination weather: {e}"
 
-        # Display origin weather & input
         if origin_weather:
             if isinstance(origin_weather, dict):
                 st.markdown(
@@ -147,7 +146,6 @@ if run_btn:
             else:
                 st.warning(origin_weather)
 
-        # Display dest weather & input
         if dest_weather:
             if isinstance(dest_weather, dict):
                 st.markdown(
@@ -185,12 +183,20 @@ if run_btn:
                 )
                 st.info(f"Risk attachment took {risk_attach_time:.2f} seconds")
 
+            route_colors = {
+                "Balanced": "yellow",
+                "Shortest Route (High Risk)": "red",
+                "Safest Route (Longer)": "green",
+                "Custom": "blue"
+            }
+            selected_color = route_colors.get(route_profile, "green")
+
             with st.spinner("Computing route and rendering map..."):
                 start_route = time.perf_counter()
                 path = safest_path_bmssp(G, (origin_lat, origin_lon), (dest_lat, dest_lon),
                                         alpha=alpha_val, beta=beta_val, bound_B=bound_B)
                 save_map_path = MAP_PATH
-                folium_map_with_route(G, path, clusters, accidents_df=df, save_path=save_map_path)
+                folium_map_with_route(G, path, clusters, accidents_df=df, save_path=save_map_path, route_color=selected_color)
                 route_time = time.perf_counter() - start_route
 
             st.success(f"Done! Accidents used: {len(df):,} • Hotspots: {len(clusters)}")
