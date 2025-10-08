@@ -179,7 +179,7 @@ def safest_path_bmssp(G: nx.MultiDiGraph, origin_latlon: tuple[float, float],
     return path
 
 
-def folium_map_with_route(G, path_nodes, clusters, accidents_df=None, save_path=None):
+def folium_map_with_route(G, path_nodes, clusters, accidents_df=None, save_path=None, route_color="green"):
     if path_nodes:
         start_lat, start_lon = G.nodes[path_nodes[0]]['y'], G.nodes[path_nodes[0]]['x']
     else:
@@ -205,7 +205,6 @@ def folium_map_with_route(G, path_nodes, clusters, accidents_df=None, save_path=
             min_opacity=0.3
         ).add_to(m)
 
-    # Create Leaflet MarkerCluster for hotspot clusters in green number style
     mc = MarkerCluster(name='Accident Hotspots').add_to(m)
     for _, r in clusters.iterrows():
         folium.Marker(
@@ -216,7 +215,7 @@ def folium_map_with_route(G, path_nodes, clusters, accidents_df=None, save_path=
 
     if path_nodes and len(path_nodes) > 1:
         coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path_nodes]
-        folium.PolyLine(coords, color="green", weight=6, opacity=0.9, tooltip="Safest route").add_to(m)
+        folium.PolyLine(coords, color=route_color, weight=6, opacity=0.9, tooltip="Safest route").add_to(m)
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
